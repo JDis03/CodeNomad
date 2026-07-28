@@ -48,9 +48,11 @@ import {
   clearActiveParentSession,
   createSession,
   fetchSessions,
+  loadMessages,
   updateSessionAgent,
   updateSessionModel,
 } from "./stores/sessions"
+import { useForegroundRefresh } from "./lib/hooks/use-foreground-refresh"
 
 import { hasWakeLockEligibleWork } from "./stores/session-status"
 import { openSettings } from "./stores/settings-screen"
@@ -257,6 +259,16 @@ const App: Component = () => {
     const instance = activeInstance()
     if (!instance) return null
     return activeSessionId().get(instance.id) || null
+  })
+
+  useForegroundRefresh({
+    onRefresh: async () => {
+      const instance = activeInstance()
+      const sessionId = activeSessionIdForInstance()
+      if (!instance || !sessionId || sessionId === "info") return
+      await fetchSessions(instance.id)
+      await loadMessages(instance.id, sessionId, { force: true })
+    },
   })
 
   const launchErrorPath = () => {

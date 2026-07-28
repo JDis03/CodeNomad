@@ -5,6 +5,16 @@ type EventSourceLogger = {
   error: (message: string, error?: unknown) => void
 }
 
+let globalPingListener: ((ts?: number) => void) | null = null
+
+export function setGlobalPingListener(listener: ((ts?: number) => void) | null): void {
+  globalPingListener = listener
+}
+
+export function getGlobalPingListener(): ((ts?: number) => void) | null {
+  return globalPingListener
+}
+
 type EventSourceWithClose = EventSource & {
   onclose?: () => void
 }
@@ -53,6 +63,7 @@ export function attachEventSourceHandlers(source: EventSource, options: EventSou
     try {
       const payload = event.data ? (JSON.parse(event.data) as { ts?: number }) : {}
       options.onPing?.(payload)
+      getGlobalPingListener()?.(payload.ts)
     } catch (error) {
       options.logger.error("Failed to parse ping event", error)
     }

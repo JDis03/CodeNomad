@@ -32,6 +32,7 @@ import type {
 } from "../../../server/src/api-types"
 import { getLogger } from "./logger"
 import { deriveDisplayConnectionStatus, type ConnectionStatus } from "./connection-status"
+import { setGlobalPingListener } from "./event-source-handlers"
 
 const log = getLogger("sse")
 
@@ -127,6 +128,10 @@ class SSEManager {
     serverEvents.onTransportStatus((status) => {
       log.info("SSE transport status changed", { status })
       setTransportStatus(status)
+    })
+
+    setGlobalPingListener((ts) => {
+      this.onPingReceived?.(ts)
     })
   }
 
@@ -251,6 +256,7 @@ class SSEManager {
   onBackgroundProcessRemoved?: (instanceId: string, event: BackgroundProcessRemovedEvent) => void
   onInstanceDisposed?: (instanceId: string, event: ServerInstanceDisposedEvent) => void
   onConnectionLost?: (instanceId: string, reason: string) => void | Promise<void>
+  onPingReceived?: (ts?: number) => void
 
   getStatus(instanceId: string): ConnectionStatus | null {
     return deriveDisplayConnectionStatus(connectionStatus().get(instanceId) ?? null, transportStatus())

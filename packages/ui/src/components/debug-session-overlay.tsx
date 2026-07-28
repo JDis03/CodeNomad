@@ -1,14 +1,39 @@
 import { Component, createSignal, onMount, onCleanup, For, Show } from "solid-js"
-import { sessions } from "../stores/sessions"
-import { instances, activeInstanceId } from "../stores/instances"
-import { Copy, Check, Share2, X, Minimize2, Maximize2 } from "lucide-solid"
+import { serverEvents } from "../lib/server-events"
+import { sseManager } from "../lib/sse-manager"
+import { Copy, Check, X, Minimize2, Maximize2, RefreshCw } from "lucide-solid"
+
+type LogEntry = {
+  id: number
+  ts: number
+  type: "ping" | "pong" | "event" | "transport" | "visibility" | "reconnect" | "connection-lost" | "error"
+  message: string
+  detail?: string
+}
+
+const MAX_LOG_ENTRIES = 50
+let nextLogId = 1
 
 const DebugSessionOverlay: Component = () => {
   const [visible, setVisible] = createSignal(false)
   const [minimized, setMinimized] = createSignal(false)
   const [position, setPosition] = createSignal({ x: 20, y: 20 })
   const [copiedId, setCopiedId] = createSignal<string | null>(null)
-  const [keyboardInput, setKeyboardInput] = createSignal("")
+  const [logs, setLogs] = createSignal<LogEntry[]>([])
+  const [lastPingAt, setLastPingAt] = createSignal<number | null>(null)
+  const [lastEventAt, setLastEventAt] = createSignal<number | null>(null)
+  const [transportStatus, setTransportStatus] = createSignal<string>("connecting")
+  const [connectionStatuses, setConnectionStatuses] = createSignal<Map<string, string>>(new Map())
+
+  const addLog = (type: LogEntry["type"], message: string, detail?: string) => {
+    setLogs((prev) => {
+      const next = [...prev, { id: nextLogId++, ts: Date.now(), type, message, detail }]
+      if (next.length > MAX_LOG_ENTRIES) {
+        return next.slice(next.length - MAX_LOG_ENTRIES)
+      }
+      return next
+    })
+  }
 
   const copyToClipboard = async (text: string, id: string) => {
     try {
@@ -20,28 +45,21 @@ const DebugSessionOverlay: Component = () => {
     }
   }
 
-  const shareDebugInfo = async () => {
-    const debugInfo = {
-      activeInstance: activeInstanceId(),
-      instances: Array.from(instances().entries()).map(([id, inst]) => ({
-        id,
-        folder: inst.folder,
-        status: inst.status,
-        sessions: Array.from(sessions().get(id)?.entries() || []).map(([sid, sess]) => ({
-          id: sid,
-          title: sess.title,
-          directory: (sess as any).directory,
-          parentId: sess.parentId,
-        })),
-      })),
-    }
-    const text = JSON.stringify(debugInfo, null, 2)
-    await copyToClipboard(text, "share")
+  const formatTime = (ts: number | null) => {
+    if (!ts) return "never"
+    const diff = Date.now() - ts
+    if (diff < 1000) return "just now"
+    if (diff < 60000) return `${Math.floor(diff / 1000)}s ago`
+    return `${Math.floor(diff / 1000)}s ago (${new Date(ts).toLocaleTimeString()})`
+  }
+
+  const forceReconnect = () => {
+    addLog("reconnect", "Manual reconnect requested")
+    serverEvents.restart("manual reconnect from debug overlay")
   }
 
   onMount(() => {
     const handleKeyPress = (e: KeyboardEvent) => {
-      // Ctrl+Shift+D to toggle
       if (e.ctrlKey && e.shiftKey && e.key === "D") {
         e.preventDefault()
         setVisible(!visible())
@@ -51,8 +69,83 @@ const DebugSessionOverlay: Component = () => {
       }
     }
     window.addEventListener("keydown", handleKeyPress)
-    onCleanup(() => window.removeEventListener("keydown", handleKeyPress))
+
+    const handleVisibility = () => {
+      const state = document.visibilityState
+      const hiddenTime = document.hidden ? Date.now() : undefined
+      addLog("visibility", `Page became ${state}`, hiddenTime ? `hidden at ${new Date(hiddenTime).toLocaleTimeString()}` : undefined)
+    }
+    document.addEventListener("visibilitychange", handleVisibility)
+
+    const unsubscribeTransport = serverEvents.onTransportStatus((status) => {
+      setTransportStatus(status)
+      addLog("transport", `Transport status: ${status}`)
+    })
+
+    const unsubscribeOpen = serverEvents.onOpen(() => {
+      addLog("transport", "Events stream opened")
+    })
+
+    const originalOnPingReceived = sseManager.onPingReceived
+    sseManager.onPingReceived = (ts) => {
+      originalOnPingReceived?.(ts)
+      setLastPingAt(Date.now())
+      addLog("ping", `Ping received${ts ? ` (server ts: ${ts})` : ""}`)
+    }
+
+    const originalOnMessageUpdate = sseManager.onMessageUpdate
+    sseManager.onMessageUpdate = (instanceId, event) => {
+      originalOnMessageUpdate?.(instanceId, event)
+      setLastEventAt(Date.now())
+      addLog("event", `message.updated`, event.id)
+    }
+
+    const originalOnConnectionLost = sseManager.onConnectionLost
+    sseManager.onConnectionLost = (instanceId, reason) => {
+      originalOnConnectionLost?.(instanceId, reason)
+      addLog("connection-lost", `Connection lost: ${instanceId.substring(0, 8)}...`, reason)
+    }
+
+    // Track instance connection statuses
+    const statusInterval = setInterval(() => {
+      const map = new Map<string, string>()
+      for (const [id, status] of sseManager.getStatuses().entries()) {
+        map.set(id, status ?? "unknown")
+      }
+      setConnectionStatuses(map)
+    }, 1000)
+
+    onCleanup(() => {
+      window.removeEventListener("keydown", handleKeyPress)
+      document.removeEventListener("visibilitychange", handleVisibility)
+      unsubscribeTransport()
+      unsubscribeOpen()
+      clearInterval(statusInterval)
+      sseManager.onPingReceived = originalOnPingReceived
+      sseManager.onMessageUpdate = originalOnMessageUpdate
+      sseManager.onConnectionLost = originalOnConnectionLost
+    })
   })
+
+  const logColor = (type: LogEntry["type"]) => {
+    switch (type) {
+      case "error":
+      case "connection-lost":
+        return "#ff5555"
+      case "reconnect":
+        return "#ffaa00"
+      case "ping":
+        return "#55ff55"
+      case "event":
+        return "#aaaaff"
+      case "visibility":
+        return "#ffff55"
+      case "transport":
+        return "#55ffff"
+      default:
+        return "#cccccc"
+    }
+  }
 
   return (
     <>
@@ -68,15 +161,14 @@ const DebugSessionOverlay: Component = () => {
             "font-family": "monospace",
             "font-size": "12px",
             "z-index": 99999,
-            "max-width": minimized() ? "300px" : "700px",
-            "max-height": minimized() ? "auto" : "85vh",
+            "max-width": minimized() ? "300px" : "520px",
+            "max-height": minimized() ? "auto" : "70vh",
             display: "flex",
             "flex-direction": "column",
             border: "2px solid #00ff00",
             "box-shadow": "0 4px 20px rgba(0, 255, 0, 0.3)",
           }}
         >
-          {/* Fixed Header - always visible */}
           <div
             style={{
               display: "flex",
@@ -90,16 +182,16 @@ const DebugSessionOverlay: Component = () => {
             }}
           >
             <div style={{ "font-weight": "bold", color: "#ffff00", display: "flex", "align-items": "center", gap: "8px" }}>
-              🔧 DEBUG SESSION OVERLAY
+              🔌 SSE DEBUG
             </div>
             <div style={{ display: "flex", gap: "8px", "align-items": "center" }}>
               <Show when={!minimized()}>
                 <button
-                  onClick={() => shareDebugInfo()}
+                  onClick={() => copyToClipboard(JSON.stringify(logs(), null, 2), "logs")}
                   style={{
-                    background: copiedId() === "share" ? "#00ff00" : "rgba(0, 255, 0, 0.2)",
+                    background: copiedId() === "logs" ? "#00ff00" : "rgba(0, 255, 0, 0.2)",
                     border: "1px solid #00ff00",
-                    color: copiedId() === "share" ? "#000" : "#00ff00",
+                    color: copiedId() === "logs" ? "#000" : "#00ff00",
                     padding: "4px 8px",
                     "border-radius": "4px",
                     cursor: "pointer",
@@ -108,12 +200,31 @@ const DebugSessionOverlay: Component = () => {
                     gap: "4px",
                     "font-size": "11px",
                   }}
-                  title="Copiar todo como JSON"
+                  title="Copiar logs"
                 >
-                  <Show when={copiedId() === "share"} fallback={<Share2 size={14} />}>
+                  <Show when={copiedId() === "logs"} fallback={<Copy size={14} />}>
                     <Check size={14} />
                   </Show>
-                  Share
+                  Copy
+                </button>
+                <button
+                  onClick={forceReconnect}
+                  style={{
+                    background: "rgba(0, 150, 255, 0.2)",
+                    border: "1px solid #0096ff",
+                    color: "#0096ff",
+                    padding: "4px 8px",
+                    "border-radius": "4px",
+                    cursor: "pointer",
+                    display: "flex",
+                    "align-items": "center",
+                    gap: "4px",
+                    "font-size": "11px",
+                  }}
+                  title="Forzar reconexión SSE"
+                >
+                  <RefreshCw size={14} />
+                  Reconnect
                 </button>
               </Show>
               <button
@@ -153,112 +264,57 @@ const DebugSessionOverlay: Component = () => {
             </div>
           </div>
 
-          {/* Scrollable Content */}
           <Show when={!minimized()}>
             <div
               style={{
-                padding: "16px",
+                padding: "12px 16px",
                 "overflow-y": "auto",
                 "overflow-x": "hidden",
                 "flex-grow": "1",
                 "min-height": "0",
+                "max-height": "50vh",
               }}
             >
-              <div style={{ "margin-bottom": "12px", "padding": "8px", "background-color": "rgba(255, 255, 0, 0.1)", "border-radius": "4px" }}>
-                <input
-                  type="text"
-                  placeholder="Presiona Ctrl+Shift+D para mostrar/ocultar"
-                  value={keyboardInput()}
-                  onInput={(e) => setKeyboardInput(e.currentTarget.value)}
-                  style={{
-                    width: "100%",
-                    background: "rgba(0, 0, 0, 0.5)",
-                    border: "1px solid #00ff00",
-                    color: "#00ff00",
-                    padding: "6px",
-                    "border-radius": "4px",
-                    "font-family": "monospace",
-                    "font-size": "12px",
-                  }}
-                />
+              <div style={{ "margin-bottom": "12px", padding: "8px", "background-color": "rgba(255, 255, 255, 0.08)", "border-radius": "4px" }}>
+                <div style={{ display: "flex", "justify-content": "space-between", "margin-bottom": "4px" }}>
+                  <span>Transport:</span>
+                  <span style={{ color: transportStatus() === "connected" ? "#55ff55" : transportStatus() === "connecting" ? "#ffaa00" : "#ff5555", "font-weight": "bold" }}>
+                    {transportStatus()}
+                  </span>
+                </div>
+                <div style={{ display: "flex", "justify-content": "space-between", "margin-bottom": "4px" }}>
+                  <span>Last ping:</span>
+                  <span>{formatTime(lastPingAt())}</span>
+                </div>
+                <div style={{ display: "flex", "justify-content": "space-between" }}>
+                  <span>Last event:</span>
+                  <span>{formatTime(lastEventAt())}</span>
+                </div>
+                <Show when={connectionStatuses().size > 0}>
+                  <div style={{ "margin-top": "8px", "border-top": "1px solid rgba(0,255,0,0.2)", "padding-top": "8px" }}>
+                    <div style={{ "margin-bottom": "4px", "font-weight": "bold" }}>Instance statuses:</div>
+                    <For each={Array.from(connectionStatuses().entries())}>
+                      {([id, status]) => (
+                        <div style={{ display: "flex", "justify-content": "space-between", "font-size": "11px" }}>
+                          <span>{id.substring(0, 10)}...</span>
+                          <span style={{ color: status === "connected" ? "#55ff55" : "#ffaa00" }}>{status}</span>
+                        </div>
+                      )}
+                    </For>
+                  </div>
+                </Show>
               </div>
 
-              <div style={{ "margin-bottom": "8px" }}>
-                <strong>Active Instance:</strong> {activeInstanceId() || "none"}
-              </div>
-
-              <div style={{ "margin-bottom": "12px" }}>
-                <strong>Total Instances:</strong> {instances().size}
-              </div>
-
-              <For each={Array.from(instances().entries())}>
-                {([instanceId, instance]) => (
-                  <div style={{ "margin-bottom": "16px", "padding": "8px", "background-color": "rgba(255, 255, 255, 0.1)", "border-radius": "4px" }}>
-                    <div style={{ display: "flex", "justify-content": "space-between", "align-items": "center" }}>
-                      <div style={{ color: "#00ffff", "font-weight": "bold" }}>
-                        Instance: {instanceId.substring(0, 12)}...
-                      </div>
-                      <button
-                        onClick={() => copyToClipboard(instanceId, `inst-${instanceId}`)}
-                        style={{
-                          background: copiedId() === `inst-${instanceId}` ? "#00ff00" : "transparent",
-                          border: "1px solid #00ffff",
-                          color: copiedId() === `inst-${instanceId}` ? "#000" : "#00ffff",
-                          padding: "2px 6px",
-                          "border-radius": "3px",
-                          cursor: "pointer",
-                          "font-size": "10px",
-                          display: "flex",
-                          "align-items": "center",
-                          gap: "4px",
-                        }}
-                      >
-                        <Show when={copiedId() === `inst-${instanceId}`} fallback={<Copy size={12} />}>
-                          <Check size={12} />
-                        </Show>
-                      </button>
-                    </div>
-                    <div style={{ "margin-left": "8px", "margin-top": "4px" }}>
-                      <div>Folder: {instance.folder}</div>
-                      <div>Status: {instance.status}</div>
-                      <div>
-                        Sessions: {sessions().get(instanceId)?.size || 0}
-                      </div>
-                      <For each={Array.from(sessions().get(instanceId)?.entries() || [])}>
-                        {([sessionId, session]) => (
-                          <div style={{ "margin-left": "16px", "margin-top": "4px", "padding": "4px", "background-color": "rgba(0, 255, 0, 0.1)", "border-radius": "3px" }}>
-                            <div style={{ display: "flex", "justify-content": "space-between", "align-items": "center" }}>
-                              <div style={{ color: "#ffff00", "font-size": "11px" }}>
-                                {sessionId.substring(0, 20)}...
-                              </div>
-                              <button
-                                onClick={() => copyToClipboard(sessionId, `sess-${sessionId}`)}
-                                style={{
-                                  background: copiedId() === `sess-${sessionId}` ? "#00ff00" : "transparent",
-                                  border: "1px solid #ffff00",
-                                  color: copiedId() === `sess-${sessionId}` ? "#000" : "#ffff00",
-                                  padding: "2px 4px",
-                                  "border-radius": "2px",
-                                  cursor: "pointer",
-                                  "font-size": "9px",
-                                  display: "flex",
-                                  "align-items": "center",
-                                }}
-                              >
-                                <Show when={copiedId() === `sess-${sessionId}`} fallback={<Copy size={10} />}>
-                                  <Check size={10} />
-                                </Show>
-                              </button>
-                            </div>
-                            <div style={{ "margin-left": "8px", "font-size": "11px" }}>
-                              <div>Title: {session.title}</div>
-                              <div>Directory: {(session as any).directory || "N/A"}</div>
-                              <div>Parent: {session.parentId || "null"}</div>
-                            </div>
-                          </div>
-                        )}
-                      </For>
-                    </div>
+              <div style={{ "font-weight": "bold", "margin-bottom": "6px" }}>Log ({logs().length}):</div>
+              <For each={logs()}>
+                {(entry) => (
+                  <div style={{ "margin-bottom": "4px", "font-size": "11px", "line-height": "1.4" }}>
+                    <span style={{ color: "#888" }}>{new Date(entry.ts).toLocaleTimeString()} </span>
+                    <span style={{ color: logColor(entry.type), "font-weight": "bold" }}>[{entry.type}]</span>
+                    <span style={{ color: "#ccc" }}> {entry.message}</span>
+                    <Show when={entry.detail}>
+                      <span style={{ color: "#888" }}> — {entry.detail}</span>
+                    </Show>
                   </div>
                 )}
               </For>
