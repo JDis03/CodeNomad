@@ -1,6 +1,7 @@
 import { Component, createSignal, onMount, onCleanup, For, Show } from "solid-js"
 import { serverEvents } from "../lib/server-events"
 import { sseManager } from "../lib/sse-manager"
+import { setForegroundRefreshDebugListener } from "../lib/hooks/use-foreground-refresh"
 import { Copy, Check, X, Minimize2, Maximize2, RefreshCw } from "lucide-solid"
 
 type LogEntry = {
@@ -77,20 +78,24 @@ const DebugSessionOverlay: Component = () => {
     }
     document.addEventListener("visibilitychange", handleVisibility)
 
-    let wasDisconnected = false
     const unsubscribeTransport = serverEvents.onTransportStatus((status) => {
       setTransportStatus(status)
       addLog("transport", `Transport status: ${status}`)
-      if (status === "disconnected") {
-        wasDisconnected = true
-      } else if (status === "connected" && wasDisconnected) {
-        wasDisconnected = false
-        addLog("refresh", "Session refresh triggered after reconnect")
-      }
     })
 
     const unsubscribeOpen = serverEvents.onOpen(() => {
       addLog("transport", "Events stream opened")
+    })
+
+    setForegroundRefreshDebugListener((event) => {
+      const messages: Record<typeof event, string> = {
+        "disconnected":    "Hook detectó disconnect — esperando reconnect",
+        "reconnected":     "Hook detectó reconnect — wasDisconnected=true",
+        "refresh-start":   "Refresh iniciado: fetchSessions + loadMessages",
+        "refresh-done":    "Refresh completado",
+        "refresh-skip":    "Connected pero wasDisconnected=false — sin refresh",
+      }
+      addLog("refresh", messages[event])
     })
 
     const originalOnPingReceived = sseManager.onPingReceived
@@ -131,6 +136,7 @@ const DebugSessionOverlay: Component = () => {
       sseManager.onPingReceived = originalOnPingReceived
       sseManager.onMessageUpdate = originalOnMessageUpdate
       sseManager.onConnectionLost = originalOnConnectionLost
+      setForegroundRefreshDebugListener(null)
     })
   })
 
