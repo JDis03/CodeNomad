@@ -6,7 +6,7 @@ import { Copy, Check, X, Minimize2, Maximize2, RefreshCw } from "lucide-solid"
 type LogEntry = {
   id: number
   ts: number
-  type: "ping" | "pong" | "event" | "transport" | "visibility" | "reconnect" | "connection-lost" | "error"
+  type: "ping" | "pong" | "event" | "transport" | "visibility" | "reconnect" | "connection-lost" | "error" | "refresh"
   message: string
   detail?: string
 }
@@ -77,9 +77,16 @@ const DebugSessionOverlay: Component = () => {
     }
     document.addEventListener("visibilitychange", handleVisibility)
 
+    let wasDisconnected = false
     const unsubscribeTransport = serverEvents.onTransportStatus((status) => {
       setTransportStatus(status)
       addLog("transport", `Transport status: ${status}`)
+      if (status === "disconnected") {
+        wasDisconnected = true
+      } else if (status === "connected" && wasDisconnected) {
+        wasDisconnected = false
+        addLog("refresh", "Session refresh triggered after reconnect")
+      }
     })
 
     const unsubscribeOpen = serverEvents.onOpen(() => {
@@ -134,6 +141,8 @@ const DebugSessionOverlay: Component = () => {
         return "#ff5555"
       case "reconnect":
         return "#ffaa00"
+      case "refresh":
+        return "#ff77ff"
       case "ping":
         return "#55ff55"
       case "event":

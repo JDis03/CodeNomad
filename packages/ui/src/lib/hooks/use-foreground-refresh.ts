@@ -1,48 +1,43 @@
 import { onCleanup, onMount } from "solid-js"
 import { getLogger } from "../logger"
+import { serverEvents } from "../server-events"
 
 const log = getLogger("foreground-refresh")
-
-const MIN_BACKGROUND_MS = 3000
 
 interface ForegroundRefreshOptions {
   onRefresh: () => void | Promise<void>
 }
 
 /**
- * Calls `onRefresh` when the page returns to the foreground after being
- * hidden for at least MIN_BACKGROUND_MS milliseconds.
+ * Calls `onRefresh` when the SSE transport reconnects after a real
+ * disconnection. This is the reliable signal that we missed events
+ * while the connection was down (e.g. mobile browser suspended the tab).
  *
- * This is used to recover from stale tool/message state after the mobile
- * browser suspends the page in the background (e.g. user switches apps).
+ * We intentionally do NOT fire on every visibilitychange because the
+ * SSE connection can survive short background trips, and a force-reload
+ * while a message is in-flight clears the sending state and confuses
+ * the UI.
  */
 export function useForegroundRefresh(options: ForegroundRefreshOptions): void {
   onMount(() => {
-    let hiddenAt: number | null = null
+    let wasDisconnected = false
 
-    const handleVisibility = () => {
-      if (document.hidden) {
-        hiddenAt = Date.now()
+    const unsubscribe = serverEvents.onTransportStatus((status) => {
+      if (status === "disconnected") {
+        wasDisconnected = true
+        log.info("SSE transport disconnected — will refresh on reconnect")
         return
       }
 
-      if (hiddenAt === null) return
-
-      const elapsed = Date.now() - hiddenAt
-      hiddenAt = null
-
-      if (elapsed < MIN_BACKGROUND_MS) {
-        log.info("Foreground return: skipping refresh (was hidden too briefly)", { elapsedMs: elapsed })
-        return
+      if (status === "connected" && wasDisconnected) {
+        wasDisconnected = false
+        log.info("SSE transport reconnected — refreshing session state")
+        void Promise.resolve(options.onRefresh()).catch((error) => {
+          log.error("Foreground refresh failed", error)
+        })
       }
+    })
 
-      log.info("Foreground return: refreshing session state", { elapsedMs: elapsed })
-      void Promise.resolve(options.onRefresh()).catch((error) => {
-        log.error("Foreground refresh failed", error)
-      })
-    }
-
-    document.addEventListener("visibilitychange", handleVisibility)
-    onCleanup(() => document.removeEventListener("visibilitychange", handleVisibility))
+    onCleanup(() => unsubscribe())
   })
 }

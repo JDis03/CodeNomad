@@ -266,6 +266,10 @@ const App: Component = () => {
       const instance = activeInstance()
       const sessionId = activeSessionIdForInstance()
       if (!instance || !sessionId || sessionId === "info") return
+      log.info("Foreground refresh: fetching session state after SSE reconnect", {
+        instanceId: instance.id,
+        sessionId,
+      })
       await fetchSessions(instance.id)
       await loadMessages(instance.id, sessionId, { force: true })
     },
