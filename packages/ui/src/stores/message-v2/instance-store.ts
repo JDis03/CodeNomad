@@ -427,6 +427,33 @@ export function createInstanceMessageStore(instanceId: string, hooks?: MessageSt
     }
   }
 
+  // Compares incoming parts against the previously stored parts for a message.
+  // Used by hydrateMessages (full reload / force refresh) to avoid bumping
+  // revision -- and therefore invalidating downstream render caches -- for
+  // messages whose content is byte-identical to what's already in the store.
+  // Cheap: parts are small (text chunks, tool state); JSON.stringify is fine
+  // here versus the cost of a full re-render of every message in the session.
+  function havePartsChanged(
+    previousPartIds: string[] | undefined,
+    previousParts: MessageRecord["parts"] | undefined,
+    nextIds: string[],
+    nextMap: MessageRecord["parts"],
+  ): boolean {
+    if (!previousPartIds || !previousParts) return true
+    if (previousPartIds.length !== nextIds.length) return true
+    for (let i = 0; i < nextIds.length; i++) {
+      if (previousPartIds[i] !== nextIds[i]) return true
+    }
+    for (const id of nextIds) {
+      const prevPart = previousParts[id]
+      const nextPart = nextMap[id]
+      if (prevPart === nextPart) continue
+      if (!prevPart || !nextPart) return true
+      if (JSON.stringify(prevPart.data) !== JSON.stringify(nextPart.data)) return true
+    }
+    return false
+  }
+
   function hydrateMessages(sessionId: string, inputs: MessageUpsertInput[], infos?: Iterable<MessageInfo>) {
     if (!Array.isArray(inputs) || inputs.length === 0) return
 
@@ -439,8 +466,12 @@ export function createInstanceMessageStore(instanceId: string, hooks?: MessageSt
 
     inputs.forEach((input) => {
       const normalizedParts = normalizeParts(input.id, input.parts)
-      const shouldBump = Boolean(input.bumpRevision || normalizedParts)
       const previous = state.messages[input.id]
+      const partsChanged = normalizedParts
+        ? havePartsChanged(previous?.partIds, previous?.parts, normalizedParts.ids, normalizedParts.map)
+        : false
+      const statusChanged = previous ? previous.status !== input.status : true
+      const shouldBump = Boolean(input.bumpRevision || partsChanged || statusChanged)
       const clientPromptDisplayMetadata = resolveClientPromptDisplayText(instanceId, input, previous)
       normalizedRecords[input.id] = {
         id: input.id,
