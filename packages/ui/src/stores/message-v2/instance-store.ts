@@ -459,7 +459,30 @@ export function createInstanceMessageStore(instanceId: string, hooks?: MessageSt
 
     ensureSessionEntry(sessionId)
 
-    const incomingIds = inputs.map((item) => item.id)
+    const serverIds = inputs.map((item) => item.id)
+    const serverIdSet = new Set(serverIds)
+
+    // Preserve locally-optimistic "sending" messages that the server hasn't
+    // echoed back yet in this snapshot (e.g. a force reload -- triggered by
+    // an SSE reconnect -- raced a message the user just sent). Without this,
+    // a wholesale replace of messageIds drops the pending bubble from the
+    // session's visible list, but its record stays orphaned in state.messages
+    // (nothing deletes it). If the real "message.updated"/"message.part.updated"
+    // SSE event for it then arrives, findPendingSyntheticMessageId can no
+    // longer find the pending id in the (already-overwritten) messageIds list
+    // to swap it for the real one via replaceMessageId, so the handler falls
+    // through to creating a brand-new record instead -- and once the next
+    // hydrate DOES include the server-confirmed message, both the orphaned
+    // optimistic bubble and the new server-confirmed one can end up visible,
+    // i.e. the message appears duplicated.
+    const previousMessageIds = state.sessions[sessionId]?.messageIds ?? []
+    const pendingOptimisticIds = previousMessageIds.filter((id) => {
+      if (serverIdSet.has(id)) return false
+      const record = state.messages[id]
+      return Boolean(record && record.isEphemeral && record.status === "sending")
+    })
+
+    const incomingIds = pendingOptimisticIds.length > 0 ? [...serverIds, ...pendingOptimisticIds] : serverIds
 
     const normalizedRecords: Record<string, MessageRecord> = {}
     const now = Date.now()
