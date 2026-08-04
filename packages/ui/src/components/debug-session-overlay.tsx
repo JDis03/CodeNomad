@@ -10,17 +10,66 @@ type LogEntry = {
   type: "ping" | "pong" | "event" | "transport" | "visibility" | "reconnect" | "connection-lost" | "error" | "refresh"
   message: string
   detail?: string
+  build?: string
 }
 
-const MAX_LOG_ENTRIES = 50
+// Kept generous on purpose: a single mobile background/foreground test can
+// span tens of minutes of ~15s pings plus disconnect/reconnect/refresh
+// entries, and the whole point of persisting is to keep enough history to
+// compare a fix across test runs -- not just the last minute.
+const MAX_LOG_ENTRIES = 400
+const STORAGE_KEY = "codenomad:debug-sse-log"
 let nextLogId = 1
 
+// The debug overlay's log used to live only in Solid component state, so a
+// mobile browser killing a backgrounded tab (very common, and exactly the
+// scenario we're testing) silently wiped the evidence needed to tell
+// whether a fix improved or regressed things. Persisting to localStorage
+// (write-through on every entry, restored on mount) means the log survives
+// tab kills and page reloads -- the tester can still export it afterward
+// even if the tab never came back to the foreground on its own.
+function loadPersistedLogs(): LogEntry[] {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    const maxId = parsed.reduce((max: number, entry: LogEntry) => Math.max(max, entry.id ?? 0), 0)
+    nextLogId = maxId + 1
+    return parsed
+  } catch {
+    return []
+  }
+}
+
+function persistLogs(entries: LogEntry[]): void {
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(entries))
+  } catch {
+    // Storage full or unavailable (e.g. private browsing) -- logging
+    // continues in-memory for the current session, we just lose durability.
+  }
+}
+
+// Identifies which deployed build produced a given log entry, read from the
+// module script the browser actually loaded (the same `main-<hash>.js` name
+// used to confirm a deploy). Lets us tell, when comparing two exported logs,
+// whether they came from before or after a given fix was deployed.
+function detectBuildId(): string {
+  const script = document.querySelector<HTMLScriptElement>('script[type="module"][src*="/main-"]') ?? document.querySelector<HTMLScriptElement>('script[src*="/main-"]')
+  const src = script?.getAttribute("src")
+  if (!src) return "unknown"
+  const match = src.match(/main-[^./]+\.js/)
+  return match ? match[0] : src
+}
+
 const DebugSessionOverlay: Component = () => {
+  const buildId = detectBuildId()
   const [visible, setVisible] = createSignal(false)
   const [minimized, setMinimized] = createSignal(false)
   const [position, setPosition] = createSignal({ x: 20, y: 20 })
   const [copiedId, setCopiedId] = createSignal<string | null>(null)
-  const [logs, setLogs] = createSignal<LogEntry[]>([])
+  const [logs, setLogs] = createSignal<LogEntry[]>(loadPersistedLogs())
   const [lastPingAt, setLastPingAt] = createSignal<number | null>(null)
   const [lastEventAt, setLastEventAt] = createSignal<number | null>(null)
   const [transportStatus, setTransportStatus] = createSignal<string>("connecting")
@@ -28,12 +77,16 @@ const DebugSessionOverlay: Component = () => {
 
   const addLog = (type: LogEntry["type"], message: string, detail?: string) => {
     setLogs((prev) => {
-      const next = [...prev, { id: nextLogId++, ts: Date.now(), type, message, detail }]
-      if (next.length > MAX_LOG_ENTRIES) {
-        return next.slice(next.length - MAX_LOG_ENTRIES)
-      }
-      return next
+      const next = [...prev, { id: nextLogId++, ts: Date.now(), type, message, detail, build: buildId }]
+      const trimmed = next.length > MAX_LOG_ENTRIES ? next.slice(next.length - MAX_LOG_ENTRIES) : next
+      persistLogs(trimmed)
+      return trimmed
     })
+  }
+
+  const clearLogs = () => {
+    setLogs([])
+    persistLogs([])
   }
 
   const copyToClipboard = async (text: string, id: string) => {
@@ -241,6 +294,21 @@ const DebugSessionOverlay: Component = () => {
                   <RefreshCw size={14} />
                   Reconnect
                 </button>
+                <button
+                  onClick={clearLogs}
+                  style={{
+                    background: "rgba(255, 100, 0, 0.15)",
+                    border: "1px solid #ff6400",
+                    color: "#ff9955",
+                    padding: "4px 8px",
+                    "border-radius": "4px",
+                    cursor: "pointer",
+                    "font-size": "11px",
+                  }}
+                  title="Borrar logs (también del almacenamiento persistido)"
+                >
+                  Clear
+                </button>
               </Show>
               <button
                 onClick={() => setMinimized(!minimized())}
@@ -292,6 +360,14 @@ const DebugSessionOverlay: Component = () => {
             >
               <div style={{ "margin-bottom": "12px", padding: "8px", "background-color": "rgba(255, 255, 255, 0.08)", "border-radius": "4px" }}>
                 <div style={{ display: "flex", "justify-content": "space-between", "margin-bottom": "4px" }}>
+                  <span>Build:</span>
+                  <span style={{ color: "#aaaaff", "font-size": "10px" }}>{buildId}</span>
+                </div>
+                <div style={{ display: "flex", "justify-content": "space-between", "margin-bottom": "4px" }}>
+                  <span>Persisted:</span>
+                  <span style={{ color: "#888", "font-size": "10px" }}>localStorage · sobrevive a cierre de tab</span>
+                </div>
+                <div style={{ display: "flex", "justify-content": "space-between", "margin-bottom": "4px" }}>
                   <span>Transport:</span>
                   <span style={{ color: transportStatus() === "connected" ? "#55ff55" : transportStatus() === "connecting" ? "#ffaa00" : "#ff5555", "font-weight": "bold" }}>
                     {transportStatus()}
@@ -329,6 +405,9 @@ const DebugSessionOverlay: Component = () => {
                     <span style={{ color: "#ccc" }}> {entry.message}</span>
                     <Show when={entry.detail}>
                       <span style={{ color: "#888" }}> — {entry.detail}</span>
+                    </Show>
+                    <Show when={entry.build && entry.build !== buildId}>
+                      <span style={{ color: "#ff9955", "font-size": "9px" }}> [{entry.build}]</span>
                     </Show>
                   </div>
                 )}
