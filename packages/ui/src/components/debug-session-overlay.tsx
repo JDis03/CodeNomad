@@ -2,12 +2,13 @@ import { Component, createSignal, onMount, onCleanup, For, Show } from "solid-js
 import { serverEvents } from "../lib/server-events"
 import { sseManager } from "../lib/sse-manager"
 import { setForegroundRefreshDebugListener } from "../lib/hooks/use-foreground-refresh"
+import { setPerfListener } from "../lib/perf"
 import { Copy, Check, X, Minimize2, Maximize2, RefreshCw } from "lucide-solid"
 
 type LogEntry = {
   id: number
   ts: number
-  type: "ping" | "pong" | "event" | "transport" | "visibility" | "reconnect" | "connection-lost" | "error" | "refresh"
+  type: "ping" | "pong" | "event" | "transport" | "visibility" | "reconnect" | "connection-lost" | "error" | "refresh" | "perf"
   message: string
   detail?: string
   build?: string
@@ -151,6 +152,11 @@ const DebugSessionOverlay: Component = () => {
       addLog("refresh", messages[event])
     })
 
+    setPerfListener((m) => {
+      const duration = m.durationMs >= 1000 ? `${(m.durationMs / 1000).toFixed(2)}s` : `${Math.round(m.durationMs)}ms`
+      addLog("perf", `${m.label}: ${duration}${m.extra ? ` (${m.extra})` : ""}`)
+    })
+
     const originalOnPingReceived = sseManager.onPingReceived
     sseManager.onPingReceived = (ts) => {
       originalOnPingReceived?.(ts)
@@ -202,6 +208,8 @@ const DebugSessionOverlay: Component = () => {
         return "#ffaa00"
       case "refresh":
         return "#ff77ff"
+      case "perf":
+        return "#ff6600"
       case "ping":
         return "#55ff55"
       case "event":

@@ -52,6 +52,7 @@ import { messageStoreBus } from "./message-v2/bus"
 import { clearCacheForSession } from "../lib/global-cache"
 import { getLogger } from "../lib/logger"
 import { requestData } from "../lib/opencode-api"
+import { reportPerf } from "../lib/perf"
 import { getRootClient } from "./opencode-client"
 import { getWorktreeSlugForSession, migrateLegacyWorktreeMapToSessionMetadata, pruneStaleLegacyWorktreeMapEntries, removeLegacyParentSessionMapping, setWorktreeSlugForParentSession } from "./worktrees"
 import { getOpenCodeWorkspaceIdForSession } from "./opencode-workspaces"
@@ -209,11 +210,15 @@ async function fetchSessions(instanceId: string, options?: { reset?: boolean }):
     const sessionListOptions = instance.folder ? { directory: instance.folder } : {}
 
     log.info("session.list", { instanceId, limit: PROJECT_SESSION_LIST_LIMIT, directory: sessionListOptions.directory, scope: "project" })
+    const tListStart = performance.now()
     const response = await fetchV2Sessions(instanceId, sessionListOptions)
+    reportPerf({ label: "fetchSessions: list (HTTP)", durationMs: performance.now() - tListStart })
 
     let statusById: Record<string, any> = {}
     try {
+        const tStatusStart = performance.now()
         const statusResponse = await rootClient.session.status()
+        reportPerf({ label: "fetchSessions: status (HTTP)", durationMs: performance.now() - tStatusStart })
       if (statusResponse.data && typeof statusResponse.data === "object") {
         statusById = statusResponse.data as Record<string, any>
       }
@@ -841,10 +846,16 @@ async function loadMessages(
 
   try {
     log.info(`[HTTP] GET /session.${"messages"} for instance ${instanceId}`, { sessionId })
+    const tFetchStart = performance.now()
     const apiMessages = await requestData<any[]>(
       client.session.messages({ sessionID: sessionId, ...(await getSessionWorkspacePayload(instanceId, sessionId)) }),
       "session.messages",
     )
+    reportPerf({
+      label: "loadMessages: HTTP fetch",
+      durationMs: performance.now() - tFetchStart,
+      extra: `${Array.isArray(apiMessages) ? apiMessages.length : "?"} msgs`,
+    })
 
     if (!Array.isArray(apiMessages)) {
       return
@@ -866,6 +877,12 @@ async function loadMessages(
     }
 
     const messagesInfo = new Map<string, any>()
+
+    // Instrumentation for diagnosing mobile background/foreground freezes:
+    // split the synchronous (main-thread-blocking) work into the phases that
+    // could actually hang the UI on a huge session. Emitted to the debug
+    // overlay via lib/perf; no-op in production.
+    const tParseStart = performance.now()
     const messages: Message[] = apiMessages.map((apiMessage: any) => {
       const info = apiMessage.info || apiMessage
       const role = info.role || "assistant"
@@ -886,6 +903,11 @@ async function loadMessages(
       }
 
       return message
+    })
+    reportPerf({
+      label: "loadMessages: normalize parts (sync)",
+      durationMs: performance.now() - tParseStart,
+      extra: `${messages.length} msgs, ${messages.reduce((n, m) => n + m.parts.length, 0)} parts`,
     })
 
     let agentName = ""
@@ -948,7 +970,17 @@ async function loadMessages(
       parentId: session?.parentId ?? null,
       revert: session?.revert,
     }
+    // Same instrumentation goal: seedSessionMessagesV2 -> hydrateMessages is
+    // synchronous and does the per-part JSON.stringify comparison on large
+    // sessions; this is the phase we most suspect of causing multi-second
+    // main-thread freezes after a reconnect.
+    const tHydrateStart = performance.now()
     seedSessionMessagesV2(instanceId, sessionForV2, messages, messagesInfo)
+    reportPerf({
+      label: "loadMessages: seedSessionMessagesV2 -> hydrateMessages (sync)",
+      durationMs: performance.now() - tHydrateStart,
+      extra: `${messages.length} msgs`,
+    })
 
     // Permissions can be hydrated before messages/tool parts exist in the store.
     // After message hydration, try to attach any pending permissions to tool-call part ids.
