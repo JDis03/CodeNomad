@@ -2,6 +2,7 @@ import { onCleanup, onMount } from "solid-js"
 import { getLogger } from "../logger"
 import { serverEvents } from "../server-events"
 import { createForegroundRefreshController } from "./foreground-refresh-controller"
+import { pushDebugEvent } from "../debug-telemetry"
 
 const log = getLogger("foreground-refresh")
 
@@ -28,11 +29,16 @@ export function useForegroundRefresh(options: ForegroundRefreshOptions): void {
     const controller = createForegroundRefreshController(
       async () => {
         log.info("SSE transport reconnected — refreshing session state")
+        pushDebugEvent("refresh", "refresh started")
         await options.onRefresh()
         log.info("Foreground refresh complete")
+        pushDebugEvent("refresh", "refresh succeeded")
       },
       {
-        onError: (error) => log.error("Foreground refresh failed — retrying while connected", error),
+        onError: (error) => {
+          log.error("Foreground refresh failed — retrying while connected", error)
+          pushDebugEvent("refresh", "refresh failed — will retry", { error: String(error) })
+        },
       },
     )
     const unsubscribe = serverEvents.onTransportStatus((status) => {

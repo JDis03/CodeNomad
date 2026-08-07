@@ -56,6 +56,9 @@ import {
   updateSessionModel,
 } from "./stores/sessions"
 import { useForegroundRefresh } from "./lib/hooks/use-foreground-refresh"
+import { pushDebugEvent } from "./lib/debug-telemetry"
+import { registerDebugOverlayShortcut } from "./lib/shortcuts/debug-overlay"
+import { DebugMobileOverlay } from "./components/debug-mobile-overlay"
 import { messagesLoaded, invalidateSessionMessageLoad } from "./stores/session-state"
 
 import { hasWakeLockEligibleWork, getSessionStatus } from "./stores/session-status"
@@ -369,11 +372,19 @@ const App: Component = () => {
           statusBefore,
           statusAfter,
         })
+        pushDebugEvent("session", `active session reload: ${statusBefore} -> ${statusAfter}`, {
+          sessionId: activeSession!,
+          failed: activeReloadFailed,
+        })
       }
 
       // Report failure so the hook keeps its dirty latch and retries on the
       // next reconnect instead of treating a partial recovery as success.
       if (failedInstanceIds.length > 0 || activeReloadFailed) {
+        pushDebugEvent("session", "foreground refresh incomplete", {
+          failedInstanceIds,
+          activeReloadFailed,
+        })
         throw new Error(
           `Foreground refresh incomplete: ${failedInstanceIds.length} session-list fetch(es) failed` +
             (activeReloadFailed ? ", active session reload failed" : ""),
@@ -610,6 +621,10 @@ const App: Component = () => {
 
   // Listen for Tauri menu events
   onMount(() => {
+    registerDebugOverlayShortcut()
+  })
+
+  onMount(() => {
     if (isTauriHost()) {
       const tauriBridge = (window as { __TAURI__?: { event?: { listen: (event: string, handler: (event: { payload: unknown }) => void) => Promise<() => void> } } }).__TAURI__
       if (tauriBridge?.event) {
@@ -798,6 +813,7 @@ const App: Component = () => {
             className: "bg-transparent border-none shadow-none p-0",
           }}
         />
+        <DebugMobileOverlay />
       </div>
     </>
   )
