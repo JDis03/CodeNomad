@@ -13,6 +13,7 @@ import { clearSessionIdleFade, IDLE_STATUS_VISIBILITY_MS, getSessionStatus, isSe
 import { deleteMessage } from "../../stores/session-actions"
 import { showAlertDialog } from "../../stores/alerts"
 import { getLogger } from "../../lib/logger"
+import { pushDebugEvent } from "../../lib/debug-telemetry"
 import { requestData } from "../../lib/opencode-api"
 import { useI18n } from "../../lib/i18n"
 import type { PromptInputApi, PromptInsertMode } from "../prompt-input/types"
@@ -301,6 +302,20 @@ export const SessionView: Component<SessionViewProps> = (props) => {
     const currentSession = session()
     if (!currentSession) return
     const sessionId = currentSession.id
+    // DEBUG: trace when the active-session effect fires a (non-forced)
+    // loadMessages. During an SSE reconnect this effect re-runs because
+    // fetchSessions mutates the session store (new reference), and if the
+    // loaded flag was cleared it triggers a redundant force:false fetch that
+    // races the onRefresh force:true reload for the same — often huge —
+    // session. Correlate this event with session-api's "HTTP fetch" telemetry:
+    // an HTTP fetch (force:false) right after this means the effect actually
+    // hit the network; no fetch means it short-circuited (already loaded).
+    pushDebugEvent("session", "session-view effect -> loadMessages(force:false)", {
+      sessionId,
+      isActive: props.isActive,
+      isLoading: isSessionMessagesLoading(props.instanceId, sessionId),
+      hasLoadError: Boolean(getSessionMessagesLoadError(props.instanceId, sessionId)),
+    })
     void waitForInstanceWorkspaceMetadataHydration(props.instanceId)
       .then(() => {
         if (!props.isActive || session()?.id !== sessionId) return
