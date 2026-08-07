@@ -345,8 +345,10 @@ const App: Component = () => {
       }
 
       let activeReloadFailed = false
+      let activeReloadError: string | undefined
       if (canReloadActive) {
         const statusBefore = getSessionStatus(activeInst!.id, activeSession!)
+        const reloadStartedAt = Date.now()
         try {
           let invalidateMessages = () => {}
           await withForegroundRefreshTimeout(
@@ -359,22 +361,26 @@ const App: Component = () => {
           )
         } catch (error) {
           activeReloadFailed = true
+          activeReloadError = error instanceof Error ? error.message : String(error)
           log.error("Foreground refresh: active session reload failed", {
             instanceId: activeInst!.id,
             sessionId: activeSession,
             error,
           })
         }
+        const reloadDurationMs = Date.now() - reloadStartedAt
         const statusAfter = getSessionStatus(activeInst!.id, activeSession!)
         log.info("Foreground refresh: active session reloaded", {
           instanceId: activeInst!.id,
           sessionId: activeSession,
           statusBefore,
           statusAfter,
+          reloadDurationMs,
         })
-        pushDebugEvent("session", `active session reload: ${statusBefore} -> ${statusAfter}`, {
+        pushDebugEvent("session", `active session reload: ${statusBefore} -> ${statusAfter} (${reloadDurationMs}ms)`, {
           sessionId: activeSession!,
           failed: activeReloadFailed,
+          ...(activeReloadError ? { error: activeReloadError } : {}),
         })
       }
 

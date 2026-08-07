@@ -58,6 +58,7 @@ import { deleteSessionAttachments } from "./attachments"
 import { DEFAULT_MODEL_OUTPUT_LIMIT, getDefaultModel, isModelValid } from "./session-models"
 import { normalizeMessagePart } from "./message-v2/normalizers"
 import { deriveMessageStatus } from "./message-v2/message-status"
+import { pushDebugEvent } from "../lib/debug-telemetry"
 import { updateSessionInfo } from "./message-v2/session-info"
 import { seedSessionMessagesV2, reconcilePendingPermissionsV2, reconcilePendingQuestionsV2 } from "./message-v2/bridge"
 import { messageStoreBus } from "./message-v2/bus"
@@ -1183,10 +1184,17 @@ async function loadMessages(
 
   try {
     log.info(`[HTTP] GET /session.${"messages"} for instance ${instanceId}`, { sessionId })
+    const fetchStartedAt = Date.now()
     const apiMessages = await requestData<any[]>(
       client.session.messages({ sessionID: sessionId, ...(await getSessionWorkspacePayload(instanceId, sessionId)) }),
       "session.messages",
     )
+    const fetchDurationMs = Date.now() - fetchStartedAt
+    pushDebugEvent("session", `loadMessages: HTTP fetch (${apiMessages?.length ?? 0} msgs)`, {
+      sessionId,
+      fetchDurationMs,
+      force,
+    })
 
     if (!isCurrentMessageLoad(instanceId, sessionId, loadEpoch) || !sessions().get(instanceId)?.has(sessionId)) return
 
@@ -1230,6 +1238,7 @@ async function loadMessages(
         return true
       })
       const messagesInfo = new Map<string, any>()
+      const normalizeStartedAt = Date.now()
       const messages: Message[] = authoritativeApiMessages.map((apiMessage: any) => {
         const info = apiMessage.info || apiMessage
         const role = info.role || "assistant"
@@ -1259,6 +1268,7 @@ async function loadMessages(
 
         return message
       })
+      const normalizeDurationMs = Date.now() - normalizeStartedAt
 
       let agentName = ""
       let providerID = ""
@@ -1304,7 +1314,16 @@ async function loadMessages(
         id: sessionId, title: session?.title, parentId: session?.parentId ?? null, revert: session?.revert,
       }
       if (!isCurrentMessageLoad(instanceId, sessionId, loadEpoch)) return
-      if (!seedSessionMessagesV2(instanceId, sessionForV2, messages, messagesInfo, messageRevision)) {
+      const hydrateStartedAt = Date.now()
+      const hydrateOk = seedSessionMessagesV2(instanceId, sessionForV2, messages, messagesInfo, messageRevision)
+      const hydrateDurationMs = Date.now() - hydrateStartedAt
+      pushDebugEvent("session", `loadMessages: fetch=${fetchDurationMs}ms normalize=${normalizeDurationMs}ms hydrate=${hydrateDurationMs}ms`, {
+        sessionId,
+        messageCount: authoritativeApiMessages.length,
+        force,
+        hydrateOk,
+      })
+      if (!hydrateOk) {
         retryAfterRevisionConflict = true
       } else {
         setMessagesLoaded((prev) => {
